@@ -550,6 +550,18 @@ export default function piScriptExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("script", {
 		description: "Toggle Pi Script single-tool TypeScript mode: /script on|off|status|types|tools",
+		getArgumentCompletions: (prefix: string) => {
+			const options = [
+				{ value: "on", label: "on", description: "Enable Pi Script single-tool mode" },
+				{ value: "off", label: "off", description: "Disable Pi Script and restore normal tools" },
+				{ value: "status", label: "status", description: "Show Pi Script mode status" },
+				{ value: "types", label: "types", description: "Show generated Pi Script SDK types" },
+				{ value: "tools", label: "tools", description: "List tools callable from Pi Script" },
+			];
+			const normalizedPrefix = prefix.trimStart();
+			const filtered = options.filter((option) => option.value.startsWith(normalizedPrefix));
+			return filtered.length > 0 ? filtered : null;
+		},
 		handler: async (args, ctx) => {
 			const arg = args.trim() || "status";
 			if (arg === "on") {
