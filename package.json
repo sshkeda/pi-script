@@ -5,6 +5,10 @@
   "type": "module",
   "main": "index.ts",
   "types": "index.ts",
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
