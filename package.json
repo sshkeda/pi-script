@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "latest",
+    "@earendil-works/pi-tui": "latest",
     "pi-context": "file:../pi-context",
     "pi-pending": "file:../pi-pending",
     "typebox": "latest",
@@ -19,6 +20,11 @@
   "devDependencies": {
     "pi-mock": "file:../pi-mock"
   },
-  "keywords": ["pi", "extension", "typescript", "script"],
+  "keywords": [
+    "pi",
+    "extension",
+    "typescript",
+    "script"
+  ],
   "license": "MIT"
 }

@@ -1,8 +1,14 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	truncateHead,
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,
@@ -15,16 +21,44 @@ import { Type } from "typebox";
 import ts from "typescript";
 import { piContext, section, stringifyPayload, sanitizeText } from "pi-context";
 import { createPiPending } from "pi-pending";
+import { Text } from "@earendil-works/pi-tui";
 
 const TOOL_NAME = "script_run";
 const CUSTOM_TYPE = "pi_script_result";
 const STATUS_ID = "pi-script";
 const MAX_CONTEXT_CHARS = 24_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
+const MAX_CALL_TEXT_CHARS = 240;
+const MAX_ARG_SUMMARY_CHARS = 220;
+const MAX_RENDER_LINES = 24;
 
 type ScriptRunParams = {
 	code: string;
 	timeoutMs?: number;
+};
+
+type ScriptCall = {
+	id: string;
+	name: string;
+	source?: string;
+	args: unknown;
+	ok: boolean;
+	text?: string;
+	error?: string;
+	durationMs?: number;
+};
+
+type ScriptDetails = {
+	id?: string;
+	returnValue?: unknown;
+	prints?: string[];
+	logs?: string[];
+	calls?: ScriptCall[];
+	callCount?: number;
+	failedCalls?: number;
+	fullOutputPath?: string;
+	truncation?: unknown;
+	error?: string;
 };
 
 type ToolResult = {
@@ -264,6 +298,52 @@ function resultText(result: ToolResult): string {
 		.join("\n");
 }
 
+function oneLine(value: unknown, maxChars = MAX_ARG_SUMMARY_CHARS): string {
+	const raw = formatValue(value).replace(/\s+/g, " ").trim();
+	return raw.length > maxChars ? `${raw.slice(0, Math.max(0, maxChars - 1))}…` : raw;
+}
+
+function firstLine(text: string, maxChars = MAX_CALL_TEXT_CHARS): string {
+	const raw = text.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+	return raw.length > maxChars ? `${raw.slice(0, Math.max(0, maxChars - 1))}…` : raw;
+}
+
+function formatCallSummary(call: ScriptCall): string {
+	const icon = call.ok ? "✓" : "✗";
+	const elapsed = call.durationMs === undefined ? "" : ` ${call.durationMs}ms`;
+	const source = call.source && call.source !== "native" ? ` [${call.source}]` : "";
+	const suffix = call.ok ? firstLine(call.text ?? "") : firstLine(call.error ?? "error");
+	return `${icon} ${call.name}${elapsed}${source} ${oneLine(call.args)}${suffix ? ` → ${suffix}` : ""}`;
+}
+
+function compactScriptContext(id: string, prints: string[], safeReturn: unknown, calls: ScriptCall[]): string {
+	const printed = prints.length ? prints.join("\n") : "(none)";
+	const callSummary = calls.length ? calls.map(formatCallSummary).join("\n") : "(none)";
+	return piContext({
+		source: "pi-script",
+		kind: "script_result",
+		id,
+		children: [
+			section("summary", `${calls.filter((call) => call.ok).length}/${calls.length} tool calls succeeded`),
+			section("prints", printed),
+			section("return", stringifyPayload(safeReturn)),
+			section("calls", callSummary),
+		],
+	});
+}
+
+async function truncateScriptContext(body: string, id: string): Promise<{ text: string; details: Pick<ScriptDetails, "truncation" | "fullOutputPath"> }> {
+	const truncation = truncateHead(body, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+	if (!truncation.truncated) return { text: truncation.content, details: {} };
+	const dir = await mkdtemp(path.join(tmpdir(), "pi-script-"));
+	const fullOutputPath = path.join(dir, `${id}.txt`);
+	await writeFile(fullOutputPath, body, "utf8");
+	const omittedLines = truncation.totalLines - truncation.outputLines;
+	const omittedBytes = truncation.totalBytes - truncation.outputBytes;
+	const notice = `\n\n[Pi Script output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ${omittedLines} lines (${formatSize(omittedBytes)}) omitted. Full output saved to: ${fullOutputPath}]`;
+	return { text: `${truncation.content}${notice}`, details: { truncation, fullOutputPath } };
+}
+
 function compileScript(code: string): string {
 	if (/^\s*import\s/m.test(code) || /^\s*export\s/m.test(code)) {
 		throw new Error("Pi Script does not support import/export in the MVP runtime. Use the global pi SDK only.");
@@ -314,7 +394,7 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 	let childSeq = 1;
 	const prints: string[] = [];
 	const logs: string[] = [];
-	const calls: Array<{ id: string; name: string; args: unknown; ok: boolean; text?: string; error?: string }> = [];
+	const calls: ScriptCall[] = [];
 
 	async function callTool(name: string, args: unknown = {}): Promise<ToolResult> {
 		const definition = getToolDefinition(pi, ctx, name);
@@ -325,8 +405,10 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 		}
 		const childId = `${parentToolCallId}.${childSeq++}.${name.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 		const preparedArgs = definition.prepareArguments ? definition.prepareArguments(args) : args;
-		calls.push({ id: childId, name, source: (definition as any).__piScriptResolveSource, args: makeJsonSafe(preparedArgs), ok: false } as any);
-		onUpdate?.({ content: [{ type: "text", text: `↳ ${name} ${formatValue(preparedArgs).slice(0, 300)}` }], details: { childId, name, args: preparedArgs } });
+		const call: ScriptCall = { id: childId, name, source: (definition as any).__piScriptResolveSource, args: makeJsonSafe(preparedArgs), ok: false };
+		calls.push(call);
+		const startedAt = Date.now();
+		onUpdate?.({ content: [{ type: "text", text: `↳ ${name} ${oneLine(preparedArgs)}` }], details: { childId, name, args: preparedArgs } });
 		try {
 			const result = await definition.execute(childId, preparedArgs, ctx.signal, (update) => {
 				onUpdate?.({
@@ -334,13 +416,13 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 					details: { childId, name, update: makeJsonSafe(update) },
 				});
 			}, ctx);
-			const call = calls[calls.length - 1];
 			call.ok = true;
-			call.text = resultText(result).slice(0, 2000);
+			call.durationMs = Date.now() - startedAt;
+			call.text = resultText(result).slice(0, MAX_CALL_TEXT_CHARS);
 			return result;
 		} catch (error) {
-			const call = calls[calls.length - 1];
 			call.ok = false;
+			call.durationMs = Date.now() - startedAt;
 			call.error = error instanceof Error ? error.message : String(error);
 			throw error;
 		}
@@ -401,19 +483,12 @@ async function executeScript(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId
 		const returnValue = await Promise.race([Promise.resolve(fn(scriptPi)), timeoutPromise]);
 		if (timeout) clearTimeout(timeout);
 		const safeReturn = makeJsonSafe(returnValue);
-		const body = piContext({
-			source: "pi-script",
-			kind: "script_result",
-			id,
-			children: [
-				section("prints", prints.join("\n")),
-				section("return", stringifyPayload(safeReturn)),
-				section("calls", stringifyPayload(calls)),
-			],
-		});
+		const body = compactScriptContext(id, prints, safeReturn, calls);
+		const truncated = await truncateScriptContext(body, id);
+		const failedCalls = calls.filter((call) => !call.ok).length;
 		return {
-			content: [{ type: "text", text: body }],
-			details: { id, returnValue: safeReturn, prints, logs, calls },
+			content: [{ type: "text", text: truncated.text }],
+			details: { id, returnValue: safeReturn, prints, logs, calls, callCount: calls.length, failedCalls, ...truncated.details } satisfies ScriptDetails,
 		};
 	} finally {
 		pending.finish(id);
@@ -502,6 +577,36 @@ export default function piScriptExtension(pi: ExtensionAPI) {
 			code: Type.String({ description: "TypeScript script body. Use the global pi object; top-level await works as normal await in the body. Do not use import/export." }),
 			timeoutMs: Type.Optional(Type.Number({ description: "Maximum script runtime in milliseconds. Default 60000." })),
 		}),
+		renderCall(args, theme) {
+			const lines = String(args.code ?? "").split(/\r?\n/).length;
+			let text = theme.fg("toolTitle", theme.bold("Pi Script "));
+			text += theme.fg("accent", `${lines} line${lines === 1 ? "" : "s"}`);
+			if (args.timeoutMs) text += theme.fg("dim", ` timeout=${args.timeoutMs}ms`);
+			return new Text(text, 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const details = result.details as ScriptDetails | undefined;
+			if (isPartial) {
+				const text = resultText(result as ToolResult) || "running";
+				return new Text(theme.fg("warning", firstLine(text, 120)), 0, 0);
+			}
+			if (details?.error) return new Text(theme.fg("error", `Pi Script failed: ${details.error}`), 0, 0);
+			const callCount = details?.callCount ?? details?.calls?.length ?? 0;
+			const failed = details?.failedCalls ?? details?.calls?.filter((call) => !call.ok).length ?? 0;
+			let text = failed > 0 ? theme.fg("error", `Pi Script: ${failed}/${callCount} calls failed`) : theme.fg("success", `Pi Script: ${callCount} call${callCount === 1 ? "" : "s"}`);
+			if (details?.prints?.length) text += theme.fg("dim", `, ${details.prints.length} print${details.prints.length === 1 ? "" : "s"}`);
+			if (details?.truncation) text += theme.fg("warning", " (truncated)");
+			if (expanded) {
+				for (const call of details?.calls ?? []) text += `\n${theme.fg(call.ok ? "dim" : "error", formatCallSummary(call))}`;
+				const content = result.content?.[0];
+				if (content?.type === "text") {
+					const lines = content.text.split(/\r?\n/).slice(0, MAX_RENDER_LINES);
+					if (lines.length) text += `\n${theme.fg("muted", lines.join("\n"))}`;
+				}
+				if (details?.fullOutputPath) text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
+			}
+			return new Text(text, 0, 0);
+		},
 		async execute(toolCallId, params, signal, onUpdate, ctx): Promise<any> {
 			if (!state.enabled) {
 				return {

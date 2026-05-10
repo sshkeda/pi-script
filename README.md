@@ -17,4 +17,6 @@ pi.print("started", test.details?.jobId);
 return { user: msg.text, test };
 ```
 
-This first version is an MVP/prototype. It uses a Node VM/transpile runtime for local experimentation, not a hardened sandbox. The native core patch still wanted for production is a first-class `invokeTool` API that emits nested tool execution events and enforces hooks/permissions exactly like top-level calls.
+Pi Script keeps model-visible output compact: final results use a `pi_context` envelope with call summaries, built-in Pi truncation limits, and a full-output temp file when truncated. The TUI renderer shows a compact native-style `Pi Script: N calls` result, with expanded call details on demand.
+
+This first version is an MVP/prototype. It uses a Node VM/transpile runtime for local experimentation, not a hardened sandbox. The native core patch still wanted for production is a first-class `invokeTool` API that emits true nested tool execution events and enforces hooks/permissions exactly like top-level calls.
