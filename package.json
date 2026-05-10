@@ -1,0 +1,24 @@
+{
+  "name": "pi-script",
+  "version": "0.1.0",
+  "description": "Pi Script: a TypeScript-native single-tool mode for Pi.",
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "pi-context": "file:../pi-context",
+    "pi-pending": "file:../pi-pending",
+    "typebox": "latest",
+    "typescript": "latest"
+  },
+  "devDependencies": {
+    "pi-mock": "file:../pi-mock"
+  },
+  "keywords": ["pi", "extension", "typescript", "script"],
+  "license": "MIT"
+}
