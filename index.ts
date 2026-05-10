@@ -117,7 +117,9 @@ function withoutScriptTool(names: string[]): string[] {
 }
 
 function setStatus(ctx: ExtensionContext | undefined) {
-	ctx?.ui.setStatus(STATUS_ID, state.enabled ? "Pi Script: on" : undefined);
+	// Keep Pi Script mode invisible in the footer/status line; command notifications
+	// and /script status are enough, and the persistent footer is distracting.
+	ctx?.ui.setStatus(STATUS_ID, undefined);
 }
 
 function getToolInfos(pi: ExtensionAPI): ToolInfoLike[] {

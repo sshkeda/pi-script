@@ -31,7 +31,7 @@ test("pi-script mode, SDK tool calls, and background-bash delegation", async () 
 
     const onResult = await mock.invokeCommand("script", "on");
     assert.deepEqual(await mock.getActiveTools(), ["script_run"]);
-    assert.ok(onResult.statusUpdates.some((update) => update.key === "pi-script" && update.text === "Pi Script: on"));
+    assert.ok(onResult.statusUpdates.some((update) => update.key === "pi-script" && update.text === undefined));
 
     const offResult = await mock.invokeCommand("script", "off");
     assert.ok(offResult.statusUpdates.some((update) => update.key === "pi-script" && update.text === undefined));
