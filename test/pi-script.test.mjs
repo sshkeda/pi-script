@@ -40,6 +40,11 @@ test("pi-script mode, SDK tool calls, and background-bash delegation", async () 
     assert.ok(active.includes("read"));
   });
 
+  await withMock({ env: { PI_SCRIPT: "1" } }, async (mock) => {
+    assert.deepEqual(await mock.getActiveTools(), ["script_run"]);
+    assert.ok(mock.statusUpdates.some((update) => update.key === "pi-script" && update.text === undefined));
+  });
+
   await withMock({}, async (mock, cwd) => {
     writeFileSync(join(cwd, "hello.txt"), "hello from pi-script\n");
     await mock.invokeCommand("script", "on");

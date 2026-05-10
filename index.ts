@@ -32,6 +32,10 @@ const MAX_CALL_TEXT_CHARS = 240;
 const MAX_ARG_SUMMARY_CHARS = 220;
 const MAX_RENDER_LINES = 24;
 
+function envEnablesPiScript(): boolean {
+	return /^(1|true|yes|on)$/i.test(process.env.PI_SCRIPT ?? process.env.PI_SCRIPT_MODE ?? "");
+}
+
 type ScriptRunParams = {
 	code: string;
 	timeoutMs?: number;
@@ -529,9 +533,15 @@ export default function piScriptExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.hasUI) pending.attach(ctx.ui);
+		if (envEnablesPiScript()) {
+			if (!state.enabled) state.previousActiveTools = withoutScriptTool(apiAny(pi).getActiveTools());
+			state.enabled = true;
+		}
 		setStatus(ctx);
 		state.lastTypes = generateTypes(pi);
-		if (!state.enabled) {
+		if (state.enabled) {
+			apiAny(pi).setActiveTools([TOOL_NAME]);
+		} else {
 			const active = withoutScriptTool(apiAny(pi).getActiveTools());
 			if (active.length !== apiAny(pi).getActiveTools().length) apiAny(pi).setActiveTools(active);
 		}
