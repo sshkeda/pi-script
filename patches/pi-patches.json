@@ -1,0 +1,44 @@
+[
+  {
+    "id": "040-extension-api-session-tool-definition-actions",
+    "file": "dist/core/agent-session.js",
+    "intent": "Bind ExtensionAPI tool definition lookup to AgentSession's full tool definition registry, so extensions like pi-script can invoke hidden built-in and extension tools after model-visible active tools are narrowed.",
+    "find": "            getActiveTools: () => this.getActiveToolNames(),\n            getAllTools: () => this.getAllTools(),\n            setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),",
+    "replace": "            getActiveTools: () => this.getActiveToolNames(),\n            getAllTools: () => this.getAllTools(),\n            getToolDefinition: (name) => this.getToolDefinition(name),\n            getAllRegisteredTools: () => Array.from(this._toolDefinitions.values()),\n            setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),",
+    "verify": "getAllRegisteredTools: () => Array.from(this._toolDefinitions.values())",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs a full definition lookup over built-in and extension tools even when only script_run is active/model-visible."
+      }
+    ]
+  },
+  {
+    "id": "041-extension-runner-preserve-session-tool-definition-actions",
+    "file": "dist/core/extensions/runner.js",
+    "intent": "Do not overwrite AgentSession-backed ExtensionAPI tool lookup actions with ExtensionRunner-only lookup; preserve the full built-in + extension tool registry when available.",
+    "find": "        this.runtime.getToolDefinition = (toolName) => this.getToolDefinition(toolName);\n        this.runtime.getAllRegisteredTools = () => this.getAllRegisteredTools();",
+    "replace": "        this.runtime.getToolDefinition = actions.getToolDefinition ?? ((toolName) => this.getToolDefinition(toolName)); // pi-claude-code compat: this.runtime.getToolDefinition = (toolName) => this.getToolDefinition(toolName);\n        this.runtime.getAllRegisteredTools = actions.getAllRegisteredTools ?? (() => this.getAllRegisteredTools());", 
+    "verify": "actions.getToolDefinition ?? ((toolName) => this.getToolDefinition(toolName))",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs full AgentSession tool lookup rather than ExtensionRunner-only custom tool lookup."
+      }
+    ]
+  }
+]
