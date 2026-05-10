@@ -1,3 +1,5 @@
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -81,7 +83,7 @@ function withoutScriptTool(names: string[]): string[] {
 }
 
 function setStatus(ctx: ExtensionContext | undefined) {
-	ctx?.ui.setStatus(STATUS_ID, state.enabled ? "Pi Script: on" : "Pi Script: off");
+	ctx?.ui.setStatus(STATUS_ID, state.enabled ? "Pi Script: on" : undefined);
 }
 
 function getToolInfos(pi: ExtensionAPI): ToolInfoLike[] {
@@ -218,7 +220,14 @@ function generateTypes(pi: ExtensionAPI): string {
 			convenience.push(`${desc}${tool.name}(args: ${typeName}): Promise<PiToolResult>;`);
 		}
 	}
-	return `// Pi Script SDK generated from currently registered Pi tools.\n${typeDecls.join("\n\n")}\n\ntype PiTextPart = { type: "text"; text: string };\ntype PiToolResult = { content: Array<PiTextPart | Record<string, unknown>>; details?: unknown; terminate?: boolean };\ntype PiMessage = { role: string; text: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: number };\n\ndeclare const pi: {\n  session: {\n    cwd(): string;\n    latestUserMessage(): PiMessage;\n    recentMessages(opts?: { limit?: number }): PiMessage[];\n  };\n  tools: {\n    call(name: string, args?: unknown): Promise<PiToolResult>;\n    list(): Array<{ name: string; description?: string }>;\n  };\n  ${convenience.join("\n  ")}\n  print(...values: unknown[]): void;\n  log(...values: unknown[]): void;\n  sleep(ms: number): Promise<void>;\n  parallel<T>(tasks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;\n};\n`;
+	return `// Pi Script SDK generated from currently registered Pi tools.\n${typeDecls.join("\n\n")}\n\ntype PiTextPart = { type: "text"; text: string };\ntype PiToolResult = { content: Array<PiTextPart | Record<string, unknown>>; details?: unknown; terminate?: boolean };\ntype PiMessage = { role: string; text: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: number };\n\ndeclare const pi: {\n  session: {\n    cwd(): string;\n    latestUserMessage(): PiMessage;\n    recentMessages(opts?: { limit?: number }): PiMessage[];\n  };\n  tools: {\n    call(name: string, args?: unknown): Promise<PiToolResult>;\n    list(): Array<{ name: string; description?: string }>;\n  };\n  ${convenience.join("\n  ")}\n  print(...values: unknown[]): void;\n  log(...values: unknown[]): void;\n  /** Import a local/helper module from the host Pi process. Relative paths resolve from the session cwd. Prefer compiled .js modules. */\n  importModule<T = unknown>(specifier: string): Promise<T>;\n  sleep(ms: number): Promise<void>;\n  parallel<T>(tasks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;\n};\n`;
+}
+
+function localModuleUrl(ctx: ExtensionContext, specifier: string): string {
+	const trimmed = specifier.trim();
+	if (!trimmed) throw new Error("module specifier is required");
+	if (/^(?:node:|data:|file:|https?:)/.test(trimmed)) return trimmed;
+	return pathToFileURL(path.resolve(ctx.cwd, trimmed)).href;
 }
 
 function formatValue(value: unknown): string {
@@ -354,6 +363,7 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 			onUpdate?.({ content: [{ type: "text", text: line }], details: { print: line } });
 		},
 		log: (...values: unknown[]) => logs.push(values.map(formatValue).join(" ")),
+		importModule: async (specifier: string) => import(localModuleUrl(ctx, specifier)),
 		sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms))),
 		parallel: <T>(tasks: Array<() => Promise<T>>, opts?: { concurrency?: number }) => mapLimit(tasks, opts?.concurrency ?? tasks.length),
 	};

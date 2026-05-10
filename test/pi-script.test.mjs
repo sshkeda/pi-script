@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFile, unlink } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +57,24 @@ test("pi-script mode, SDK tool calls, and background-bash delegation", async () 
     assert.deepEqual(details.prints, ["read complete"]);
     assert.equal(details.calls[0].name, "read");
   });
+
+  const helper = new URL("../tmp-pi-script-helper.mjs", import.meta.url);
+  await writeFile(helper, "export function upper(value) { return String(value).toUpperCase(); }\n");
+  try {
+    await withMock({}, async (mock) => {
+      await mock.invokeCommand("script", "on");
+      const result = await mock.invokeTool("script_run", {
+        code: `
+          const helper = await pi.importModule("${helper.pathname}");
+          return helper.upper("local sdk works");
+        `,
+      });
+      assert.equal(result.ok, true, result.error);
+      assert.equal(result.result?.details?.returnValue, "LOCAL SDK WORKS");
+    });
+  } finally {
+    await unlink(helper).catch(() => {});
+  }
 
   const cwd = mkdtempSync(join(tmpdir(), "pi-script-bg-test-"));
   const code = `
