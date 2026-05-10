@@ -25,7 +25,7 @@
     "file": "dist/core/extensions/runner.js",
     "intent": "Do not overwrite AgentSession-backed ExtensionAPI tool lookup actions with ExtensionRunner-only lookup; preserve the full built-in + extension tool registry when available.",
     "find": "        this.runtime.getToolDefinition = (toolName) => this.getToolDefinition(toolName);\n        this.runtime.getAllRegisteredTools = () => this.getAllRegisteredTools();",
-    "replace": "        this.runtime.getToolDefinition = actions.getToolDefinition ?? ((toolName) => this.getToolDefinition(toolName)); // pi-claude-code compat: this.runtime.getToolDefinition = (toolName) => this.getToolDefinition(toolName);\n        this.runtime.getAllRegisteredTools = actions.getAllRegisteredTools ?? (() => this.getAllRegisteredTools());", 
+    "replace": "        this.runtime.getToolDefinition = actions.getToolDefinition ?? ((toolName) => this.getToolDefinition(toolName)); // pi-claude-code compat: this.runtime.getToolDefinition = (toolName) => this.getToolDefinition(toolName);\n        this.runtime.getAllRegisteredTools = actions.getAllRegisteredTools ?? (() => this.getAllRegisteredTools());",
     "verify": "actions.getToolDefinition ?? ((toolName) => this.getToolDefinition(toolName))",
     "occurrences": 1,
     "references": [
@@ -38,6 +38,195 @@
         "type": "consumer-repo",
         "repo": "pi-script",
         "reason": "Pi Script needs full AgentSession tool lookup rather than ExtensionRunner-only custom tool lookup."
+      }
+    ]
+  },
+  {
+    "id": "042-agent-session-nested-tool-counter",
+    "file": "dist/core/agent-session.js",
+    "intent": "Add an AgentSession counter for stable nested tool call ids emitted by extension-driven tool invocations.",
+    "find": "    _extensionRunnerRef;\n    _initialActiveToolNames;",
+    "replace": "    _extensionRunnerRef;\n    _nestedToolCallSeq = 0;\n    _initialActiveToolNames;",
+    "verify": "_nestedToolCallSeq = 0;",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "043-agent-session-invoke-tool-method",
+    "file": "dist/core/agent-session.js",
+    "intent": "Expose an internal AgentSession.invokeTool helper that executes registered tools through native tool_call/tool_result hooks and emits tool_execution_start/update/end events without adding standalone tool-result messages to model context.",
+    "find": "    getToolDefinition(name) {\n        return this._toolDefinitions.get(name)?.definition;\n    }\n    /**\n     * Set active tools by name.",
+    "replace": "    getToolDefinition(name) {\n        return this._toolDefinitions.get(name)?.definition;\n    }\n    _createErrorToolResult(message) {\n        return { content: [{ type: \"text\", text: message }], details: {} };\n    }\n    async invokeTool(name, args = {}, options = {}) {\n        const tool = this._toolRegistry.get(name);\n        const toolCallId = options.toolCallId ?? `${options.parentToolCallId ?? \"nested\"}.${++this._nestedToolCallSeq}.${name.replace(/[^A-Za-z0-9_-]/g, \"_\")}`;\n        const rawArgs = args ?? {};\n        await this._processAgentEvent({\n            type: \"tool_execution_start\",\n            toolCallId,\n            toolName: name,\n            args: rawArgs,\n        });\n        let result;\n        let isError = false;\n        let preparedArgs = rawArgs;\n        try {\n            if (!tool) {\n                result = this._createErrorToolResult(`Tool ${name} not found`);\n                isError = true;\n            }\n            else {\n                preparedArgs = tool.prepareArguments ? tool.prepareArguments(rawArgs) : rawArgs;\n                const beforeResult = await this._extensionRunner.emitToolCall({\n                    type: \"tool_call\",\n                    toolName: name,\n                    toolCallId,\n                    input: preparedArgs,\n                });\n                if (beforeResult?.block) {\n                    result = beforeResult.content || beforeResult.details !== undefined\n                        ? {\n                            content: beforeResult.content ?? [{ type: \"text\", text: beforeResult.reason || \"Tool execution was blocked\" }],\n                            details: beforeResult.details,\n                        }\n                        : this._createErrorToolResult(beforeResult.reason || \"Tool execution was blocked\");\n                    isError = beforeResult.isError ?? !(beforeResult.content || beforeResult.details !== undefined);\n                }\n                else {\n                    try {\n                        result = await tool.execute(toolCallId, preparedArgs, options.signal ?? this.agent.signal, (partialResult) => {\n                            options.onUpdate?.(partialResult);\n                            void this._processAgentEvent({\n                                type: \"tool_execution_update\",\n                                toolCallId,\n                                toolName: name,\n                                args: preparedArgs,\n                                partialResult,\n                            });\n                        });\n                    }\n                    catch (error) {\n                        result = this._createErrorToolResult(error instanceof Error ? error.message : String(error));\n                        isError = true;\n                    }\n                    const afterResult = await this._extensionRunner.emitToolResult({\n                        type: \"tool_result\",\n                        toolName: name,\n                        toolCallId,\n                        input: preparedArgs,\n                        content: result.content,\n                        details: result.details,\n                        isError,\n                    });\n                    if (afterResult) {\n                        result = {\n                            content: afterResult.content ?? result.content,\n                            details: afterResult.details ?? result.details,\n                            terminate: afterResult.terminate ?? result.terminate,\n                        };\n                        isError = afterResult.isError ?? isError;\n                    }\n                }\n            }\n        }\n        catch (error) {\n            result = this._createErrorToolResult(error instanceof Error ? error.message : String(error));\n            isError = true;\n        }\n        await this._processAgentEvent({\n            type: \"tool_execution_end\",\n            toolCallId,\n            toolName: name,\n            result,\n            isError,\n        });\n        if (isError && options.throwOnError) {\n            throw new Error(result.content?.map((part) => part?.type === \"text\" ? part.text : JSON.stringify(part)).join(\"\\n\") || `Tool ${name} failed`);\n        }\n        return options.includeMetadata ? { ...result, isError, toolCallId } : result;\n    }\n    /**\n     * Set active tools by name.",
+    "verify": "async invokeTool(name, args = {}, options = {})",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "044-agent-session-bind-invoke-tool-context-action",
+    "file": "dist/core/agent-session.js",
+    "intent": "Bind AgentSession.invokeTool into ExtensionContext actions so tools/extensions can invoke nested tools natively.",
+    "find": "            getSystemPrompt: () => this.systemPrompt,\n        }, {",
+    "replace": "            getSystemPrompt: () => this.systemPrompt,\n            invokeTool: (name, args, options) => this.invokeTool(name, args, options),\n        }, {",
+    "verify": "invokeTool: (name, args, options) => this.invokeTool(name, args, options)",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "045-runner-invoke-tool-context-action-field",
+    "file": "dist/core/extensions/runner.js",
+    "intent": "Add an ExtensionRunner invokeTool context action field.",
+    "find": "    getSystemPromptFn = () => \"\";\n    newSessionHandler",
+    "replace": "    getSystemPromptFn = () => \"\";\n    invokeToolFn = async () => { throw new Error(\"Extension runtime not initialized\"); };\n    newSessionHandler",
+    "verify": "invokeToolFn = async () => { throw new Error(\"Extension runtime not initialized\"); };",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "046-runner-bind-invoke-tool-context-action",
+    "file": "dist/core/extensions/runner.js",
+    "intent": "Bind AgentSession-backed invokeTool into ExtensionRunner contexts.",
+    "find": "        this.getSystemPromptFn = contextActions.getSystemPrompt;\n        // Flush provider registrations",
+    "replace": "        this.getSystemPromptFn = contextActions.getSystemPrompt;\n        this.invokeToolFn = contextActions.invokeTool ?? this.invokeToolFn;\n        // Flush provider registrations",
+    "verify": "this.invokeToolFn = contextActions.invokeTool ?? this.invokeToolFn;",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "047-runner-expose-invoke-tool-on-extension-context",
+    "file": "dist/core/extensions/runner.js",
+    "intent": "Expose invokeTool on ExtensionContext instances.",
+    "find": "            getSystemPrompt: () => {\n                runner.assertActive();\n                return runner.getSystemPromptFn();\n            },\n        };",
+    "replace": "            getSystemPrompt: () => {\n                runner.assertActive();\n                return runner.getSystemPromptFn();\n            },\n            invokeTool: (name, args, options) => {\n                runner.assertActive();\n                return runner.invokeToolFn(name, args, options);\n            },\n        };",
+    "verify": "invokeTool: (name, args, options) => {\n                runner.assertActive();",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "048-types-invoke-tool-options",
+    "file": "dist/core/extensions/types.d.ts",
+    "intent": "Declare InvokeToolOptions for native extension-driven tool invocation.",
+    "find": "export interface CompactOptions {\n    customInstructions?: string;\n    onComplete?: (result: CompactionResult) => void;\n    onError?: (error: Error) => void;\n}\n/**\n * Context passed to extension event handlers.\n */",
+    "replace": "export interface CompactOptions {\n    customInstructions?: string;\n    onComplete?: (result: CompactionResult) => void;\n    onError?: (error: Error) => void;\n}\nexport interface InvokeToolOptions {\n    /** Parent tool call id for nested/audited tool execution. */\n    parentToolCallId?: string;\n    /** Override generated child tool call id. */\n    toolCallId?: string;\n    /** Override abort signal. Defaults to current agent signal. */\n    signal?: AbortSignal;\n    /** Receive partial updates from the invoked tool. */\n    onUpdate?: AgentToolUpdateCallback<any>;\n    /** Include isError/toolCallId metadata in the returned object. */\n    includeMetadata?: boolean;\n    /** Throw when the invoked tool returns an error result. */\n    throwOnError?: boolean;\n}\n/**\n * Context passed to extension event handlers.\n */",
+    "verify": "export interface InvokeToolOptions {",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "049-types-extension-context-invoke-tool",
+    "file": "dist/core/extensions/types.d.ts",
+    "intent": "Expose invokeTool on ExtensionContext.",
+    "find": "    /** Get the current effective system prompt. */\n    getSystemPrompt(): string;\n}",
+    "replace": "    /** Get the current effective system prompt. */\n    getSystemPrompt(): string;\n    /** Invoke any registered Pi tool through the native hook/event pipeline. */\n    invokeTool(name: string, args?: unknown, options?: InvokeToolOptions): Promise<AgentToolResult<any> & { isError?: boolean; toolCallId?: string }>;\n}",
+    "verify": "invokeTool(name: string, args?: unknown, options?: InvokeToolOptions)",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
+      }
+    ]
+  },
+  {
+    "id": "050-types-extension-context-actions-invoke-tool",
+    "file": "dist/core/extensions/types.d.ts",
+    "intent": "Allow modes to bind invokeTool into ExtensionContext actions.",
+    "find": "    compact: (options?: CompactOptions) => void;\n    getSystemPrompt: () => string;\n}",
+    "replace": "    compact: (options?: CompactOptions) => void;\n    getSystemPrompt: () => string;\n    invokeTool?: (name: string, args?: unknown, options?: InvokeToolOptions) => Promise<AgentToolResult<any> & { isError?: boolean; toolCallId?: string }>;\n}",
+    "verify": "invokeTool?: (name: string, args?: unknown, options?: InvokeToolOptions)",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "upstream-package",
+        "repo": "earendil-works/pi-mono",
+        "package": "@earendil-works/pi-coding-agent"
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
       }
     ]
   }

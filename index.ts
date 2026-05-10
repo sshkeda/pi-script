@@ -397,17 +397,40 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 	const calls: ScriptCall[] = [];
 
 	async function callTool(name: string, args: unknown = {}): Promise<ToolResult> {
+		const childId = `${parentToolCallId}.${childSeq++}.${name.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+		const startedAt = Date.now();
+		const nativeInvoke = (ctx as any).invokeTool as ((name: string, args?: unknown, options?: Record<string, unknown>) => Promise<ToolResult & { isError?: boolean; toolCallId?: string }>) | undefined;
+		if (typeof nativeInvoke === "function") {
+			const call: ScriptCall = { id: childId, name, source: "native", args: makeJsonSafe(args), ok: false };
+			calls.push(call);
+			try {
+				const result = await nativeInvoke(name, args, {
+					parentToolCallId,
+					toolCallId: childId,
+					includeMetadata: true,
+					throwOnError: true,
+				});
+				call.ok = !result.isError;
+				call.durationMs = Date.now() - startedAt;
+				call.text = resultText(result).slice(0, MAX_CALL_TEXT_CHARS);
+				return result;
+			} catch (error) {
+				call.ok = false;
+				call.durationMs = Date.now() - startedAt;
+				call.error = error instanceof Error ? error.message : String(error);
+				throw error;
+			}
+		}
+
 		const definition = getToolDefinition(pi, ctx, name);
 		if (!definition) {
 			const configured = typeof apiAny(pi).getAllTools === "function" ? apiAny(pi).getAllTools().map((tool: ToolInfoLike) => tool.name).join(",") : "<no getAllTools>";
 			const registered = typeof apiAny(pi).getAllRegisteredTools === "function" ? apiAny(pi).getAllRegisteredTools().map((entry: any) => entry.definition?.name ?? entry.name).join(",") : "<no getAllRegisteredTools>";
 			throw new Error(`Tool ${name} is not registered or cannot be invoked from Pi Script. configured=[${configured}] registered=[${registered}] hasGetToolDefinition=${typeof apiAny(pi).getToolDefinition}`);
 		}
-		const childId = `${parentToolCallId}.${childSeq++}.${name.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 		const preparedArgs = definition.prepareArguments ? definition.prepareArguments(args) : args;
 		const call: ScriptCall = { id: childId, name, source: (definition as any).__piScriptResolveSource, args: makeJsonSafe(preparedArgs), ok: false };
 		calls.push(call);
-		const startedAt = Date.now();
 		onUpdate?.({ content: [{ type: "text", text: `↳ ${name} ${oneLine(preparedArgs)}` }], details: { childId, name, args: preparedArgs } });
 		try {
 			const result = await definition.execute(childId, preparedArgs, ctx.signal, (update) => {

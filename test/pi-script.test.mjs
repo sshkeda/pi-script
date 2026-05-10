@@ -87,6 +87,13 @@ test("pi-script mode, SDK tool calls, and background-bash delegation", async () 
   try {
     await mock.invokeCommand("script", "on");
     const events = await mock.run("start background bash from pi-script", 20_000);
+    const starts = events.filter((event) => event.type === "tool_execution_start");
+    const scriptStart = starts.find((event) => event.toolName === "script_run");
+    const bashStart = starts.find((event) => event.toolName === "bash");
+    assert.ok(scriptStart);
+    assert.ok(bashStart);
+    assert.ok(bashStart.toolCallId.startsWith(`${scriptStart.toolCallId}.`));
+
     const serialized = JSON.stringify(events);
     assert.match(serialized, /\"name\":\"bash\"/);
     assert.doesNotMatch(serialized, /builtin-fallback/);
