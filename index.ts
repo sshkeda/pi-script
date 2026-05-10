@@ -260,7 +260,7 @@ function generateTypes(pi: ExtensionAPI): string {
 			convenience.push(`${desc}${tool.name}(args: ${typeName}): Promise<PiToolResult>;`);
 		}
 	}
-	return `// Pi Script SDK generated from currently registered Pi tools.\n${typeDecls.join("\n\n")}\n\ntype PiTextPart = { type: "text"; text: string };\ntype PiToolResult = { content: Array<PiTextPart | Record<string, unknown>>; details?: unknown; terminate?: boolean };\ntype PiMessage = { role: string; text: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: number };\n\ndeclare const pi: {\n  session: {\n    cwd(): string;\n    latestUserMessage(): PiMessage;\n    recentMessages(opts?: { limit?: number }): PiMessage[];\n  };\n  tools: {\n    call(name: string, args?: unknown): Promise<PiToolResult>;\n    list(): Array<{ name: string; description?: string }>;\n  };\n  ${convenience.join("\n  ")}\n  print(...values: unknown[]): void;\n  log(...values: unknown[]): void;\n  /** Import a local/helper module from the host Pi process. Relative paths resolve from the session cwd. Prefer compiled .js modules. */\n  importModule<T = unknown>(specifier: string): Promise<T>;\n  sleep(ms: number): Promise<void>;\n  parallel<T>(tasks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;\n};\n`;
+	return `// Pi Script SDK generated from currently registered Pi tools.\n${typeDecls.join("\n\n")}\n\ntype PiTextPart = { type: "text"; text: string };\ntype PiToolResult = { content: Array<PiTextPart | Record<string, unknown>>; details?: unknown; terminate?: boolean };\ntype PiMessage = { role: string; text: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: number };\n\ndeclare const pi: {\n  session: {\n    cwd(): string;\n    latestUserMessage(): PiMessage;\n    recentMessages(opts?: { limit?: number }): PiMessage[];\n  };\n  tools: {\n    call(name: string, args?: unknown): Promise<PiToolResult>;\n    list(): Array<{ name: string; description?: string }>;\n  };\n  ${convenience.join("\n  ")}\n  print(...values: unknown[]): void;\n  log(...values: unknown[]): void;\n  /** Import a local/helper module from the host Pi process. Relative paths resolve from the session cwd. Prefer compiled .js modules. */\n  importModule<T = unknown>(specifier: string): Promise<T>;\n  /** Remove common indentation from a string or tagged template. */\n  dedent(input: TemplateStringsArray | string, ...values: unknown[]): string;\n  /** Tagged template for shell snippets. Interpolated values are shell-quoted. */\n  sh(input: TemplateStringsArray | string, ...values: unknown[]): string;\n  /** Quote a value for POSIX shell usage. */\n  shellQuote(value: unknown): string;\n  /** Run a command vector through the bash tool with safe shell quoting. */\n  exec(argv: unknown[], opts?: { cwd?: string; timeout?: number; background?: boolean }): Promise<PiToolResult>;\n  /** Write text through the write tool. */\n  writeText(path: string, content: string): Promise<PiToolResult>;\n  /** File helper, primarily for tagged-template writes. */\n  file(path: string): { write(input: TemplateStringsArray | string, ...values: unknown[]): Promise<PiToolResult> };\n  /** Start a background bash command. */\n  bg(input: TemplateStringsArray | string, ...values: unknown[]): Promise<PiToolResult>;\n  /** Mark rows as a compact table-like return value. */\n  table(rows: unknown[], columns?: string[]): unknown;\n  sleep(ms: number): Promise<void>;\n  parallel<T>(tasks: Array<() => Promise<T>>, opts?: { concurrency?: number }): Promise<T[]>;\n};\n`;
 }
 
 function localModuleUrl(ctx: ExtensionContext, specifier: string): string {
@@ -350,10 +350,18 @@ async function truncateScriptContext(body: string, id: string): Promise<{ text: 
 	return { text: `${truncation.content}${notice}`, details: { truncation, fullOutputPath } };
 }
 
-function compileScript(code: string): string {
-	if (/^\s*import\s/m.test(code) || /^\s*export\s/m.test(code)) {
-		throw new Error("Pi Script does not support import/export in the MVP runtime. Use the global pi SDK only.");
+function assertNoModuleSyntax(code: string) {
+	const source = ts.createSourceFile("pi-script-input.ts", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+	for (const statement of source.statements) {
+		if (ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement) || ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) {
+			const pos = source.getLineAndCharacterOfPosition(statement.getStart(source));
+			throw new Error(`Pi Script does not support static module syntax at line ${pos.line + 1}:${pos.character + 1}. Use the global pi SDK or await pi.importModule("./helper.js").`);
+		}
 	}
+}
+
+function compileScript(code: string): string {
+	assertNoModuleSyntax(code);
 	const wrapped = `async function __piScriptMain(pi) {\n${code}\n}\n__piScriptMain;`;
 	const compiled = ts.transpileModule(wrapped, {
 		compilerOptions: {
@@ -396,7 +404,53 @@ async function mapLimit<T>(tasks: Array<() => Promise<T>>, concurrency: number):
 	return results;
 }
 
-function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId: string, onUpdate: ((update: ToolResult) => void) | undefined) {
+type TemplateInput = TemplateStringsArray | string;
+
+type ExecOptions = {
+	cwd?: string;
+	timeout?: number;
+	background?: boolean;
+};
+
+function isTemplateStrings(value: unknown): value is TemplateStringsArray {
+	return Array.isArray(value) && Array.isArray((value as { raw?: unknown }).raw);
+}
+
+function dedentText(text: string): string {
+	const normalized = text.replace(/\r\n/g, "\n");
+	const lines = normalized.split("\n");
+	while (lines.length > 0 && lines[0]?.trim() === "") lines.shift();
+	while (lines.length > 0 && lines[lines.length - 1]?.trim() === "") lines.pop();
+	const indents = lines
+		.filter((line) => line.trim().length > 0)
+		.map((line) => line.match(/^[\t ]*/)?.[0].length ?? 0);
+	const indent = indents.length ? Math.min(...indents) : 0;
+	return lines.map((line) => line.slice(Math.min(indent, line.length))).join("\n");
+}
+
+function interpolateTemplate(strings: TemplateStringsArray, values: unknown[], valueFormatter: (value: unknown) => string = String): string {
+	let text = strings[0] ?? "";
+	for (let i = 0; i < values.length; i++) text += valueFormatter(values[i]) + (strings[i + 1] ?? "");
+	return text;
+}
+
+function dedentTemplate(input: TemplateInput, values: unknown[] = [], valueFormatter: (value: unknown) => string = String): string {
+	return dedentText(isTemplateStrings(input) ? interpolateTemplate(input, values, valueFormatter) : String(input));
+}
+
+function shellQuote(value: unknown): string {
+	if (value === undefined || value === null) return "''";
+	const text = String(value);
+	if (text.length === 0) return "''";
+	return /[^A-Za-z0-9_/:=.,+%^-]/.test(text) ? "'" + text.replace(/'/g, "'\"'\"'") + "'" : text;
+}
+
+function tableValue(rows: unknown[], columns?: string[]) {
+	const inferred = columns ?? Array.from(new Set(rows.flatMap((row) => row && typeof row === "object" && !Array.isArray(row) ? Object.keys(row as Record<string, unknown>) : [])));
+	return { kind: "pi-table", columns: inferred, rows: makeJsonSafe(rows) };
+}
+
+function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId: string, onUpdate: ((update: ToolResult) => void) | undefined, signal?: AbortSignal) {
 	let childSeq = 1;
 	const prints: string[] = [];
 	const logs: string[] = [];
@@ -415,6 +469,7 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 					toolCallId: childId,
 					includeMetadata: true,
 					throwOnError: true,
+					signal,
 				});
 				call.ok = !result.isError;
 				call.durationMs = Date.now() - startedAt;
@@ -439,7 +494,7 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 		calls.push(call);
 		onUpdate?.({ content: [{ type: "text", text: `↳ ${name} ${oneLine(preparedArgs)}` }], details: { childId, name, args: preparedArgs } });
 		try {
-			const result = await definition.execute(childId, preparedArgs, ctx.signal, (update) => {
+			const result = await definition.execute(childId, preparedArgs, signal ?? ctx.signal, (update) => {
 				onUpdate?.({
 					content: [{ type: "text", text: `↳ ${name} update\n${resultText(update).slice(0, 1000)}` }],
 					details: { childId, name, update: makeJsonSafe(update) },
@@ -475,6 +530,21 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 		},
 		log: (...values: unknown[]) => logs.push(values.map(formatValue).join(" ")),
 		importModule: async (specifier: string) => import(localModuleUrl(ctx, specifier)),
+		dedent: (input: TemplateInput, ...values: unknown[]) => dedentTemplate(input, values),
+		sh: (input: TemplateInput, ...values: unknown[]) => dedentTemplate(input, values, shellQuote),
+		shellQuote,
+		exec: (argv: unknown[], opts: ExecOptions = {}) => {
+			if (!Array.isArray(argv) || argv.length === 0) throw new Error("pi.exec(argv) requires a non-empty argument array");
+			const command = argv.map(shellQuote).join(" ");
+			const scoped = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ${command}` : command;
+			return callTool("bash", { command: scoped, timeout: opts.timeout, background: opts.background });
+		},
+		writeText: (filePath: string, content: string) => callTool("write", { path: filePath, content }),
+		file: (filePath: string) => ({
+			write: (input: TemplateInput, ...values: unknown[]) => callTool("write", { path: filePath, content: dedentTemplate(input, values) }),
+		}),
+		bg: (input: TemplateInput, ...values: unknown[]) => callTool("bash", { command: dedentTemplate(input, values, shellQuote), background: true }),
+		table: tableValue,
 		sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms))),
 		parallel: <T>(tasks: Array<() => Promise<T>>, opts?: { concurrency?: number }) => mapLimit(tasks, opts?.concurrency ?? tasks.length),
 	};
@@ -490,9 +560,14 @@ async function executeScript(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId
 	const id = `script_${state.runSeq++}`;
 	const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	pending.start({ id, text: `running ${params.code.split(/\r?\n/).length} line script`, details: { toolCallId } });
+	let timeout: NodeJS.Timeout | undefined;
+	const abortController = new AbortController();
+	const abortFromParent = () => abortController.abort((ctx.signal as any)?.reason);
+	if (ctx.signal?.aborted) abortFromParent();
+	else ctx.signal?.addEventListener("abort", abortFromParent, { once: true });
 	try {
 		const compiled = compileScript(params.code);
-		const { scriptPi, prints, logs, calls } = makeScriptPi(pi, ctx, toolCallId, onUpdate);
+		const { scriptPi, prints, logs, calls } = makeScriptPi(pi, ctx, toolCallId, onUpdate, abortController.signal);
 		const context = vm.createContext({
 			console: {
 				log: (...values: unknown[]) => scriptPi.log(...values),
@@ -504,13 +579,14 @@ async function executeScript(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId
 		});
 		const fn = new vm.Script(compiled, { filename: "pi-script.ts" }).runInContext(context, { timeout: Math.min(timeoutMs, 5_000) });
 		if (typeof fn !== "function") throw new Error("Compiled Pi Script did not produce an executable function.");
-		let timeout: NodeJS.Timeout | undefined;
 		const timeoutPromise = new Promise<never>((_, reject) => {
-			timeout = setTimeout(() => reject(new Error(`Pi Script timed out after ${timeoutMs}ms`)), timeoutMs);
+			timeout = setTimeout(() => {
+				abortController.abort(new Error(`Pi Script timed out after ${timeoutMs}ms`));
+				reject(new Error(`Pi Script timed out after ${timeoutMs}ms`));
+			}, timeoutMs);
 			timeout.unref?.();
 		});
 		const returnValue = await Promise.race([Promise.resolve(fn(scriptPi)), timeoutPromise]);
-		if (timeout) clearTimeout(timeout);
 		const safeReturn = makeJsonSafe(returnValue);
 		const body = compactScriptContext(id, prints, safeReturn, calls);
 		const truncated = await truncateScriptContext(body, id);
@@ -520,6 +596,8 @@ async function executeScript(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId
 			details: { id, returnValue: safeReturn, prints, logs, calls, callCount: calls.length, failedCalls, ...truncated.details } satisfies ScriptDetails,
 		};
 	} finally {
+		if (timeout) clearTimeout(timeout);
+		ctx.signal?.removeEventListener("abort", abortFromParent);
 		pending.finish(id);
 	}
 }
@@ -556,7 +634,7 @@ export default function piScriptExtension(pi: ExtensionAPI) {
 		state.lastTypes = generateTypes(pi);
 		const typeText = sanitizeText(state.lastTypes, { maxChars: MAX_CONTEXT_CHARS }).text;
 		return {
-			systemPrompt: `${_event.systemPrompt}\n\nPi Script mode is enabled. You have exactly one model-visible tool: ${TOOL_NAME}. Use ${TOOL_NAME} for every action. Inside ${TOOL_NAME}, write TypeScript using the global pi SDK. Do not ask for or assume direct tools; direct Pi tools are available through pi.<toolName>(args) and pi.tools.call(name, args). Top-level await is supported by writing normal await statements in the script body. Return a small JSON-serializable value and use pi.print() for model-visible progress. Long-running bash should use the bash tool's background:true option when appropriate.\n\n${typeText}`,
+			systemPrompt: `${_event.systemPrompt}\n\nPi Script mode is enabled. You have exactly one model-visible tool: ${TOOL_NAME}. Use ${TOOL_NAME} for every action. Inside ${TOOL_NAME}, write TypeScript using the global pi SDK. Do not ask for or assume direct tools; direct Pi tools are available through pi.<toolName>(args) and pi.tools.call(name, args). Top-level await is supported by writing normal await statements in the script body. Return a small JSON-serializable value and use pi.print() for model-visible progress. Use pi.dedent, pi.sh, pi.exec([...]), and pi.file(path).write(...) to avoid quote soup. Long-running bash should use background:true or pi.bg when appropriate.\n\n${typeText}`,
 		};
 	});
 
@@ -618,10 +696,10 @@ export default function piScriptExtension(pi: ExtensionAPI) {
 		promptSnippet: "Run TypeScript against the Pi Script SDK to call Pi tools and session context through a single native tool.",
 		promptGuidelines: [
 			"Use script_run for every action when Pi Script mode is enabled; call tools inside the script via pi.<toolName>(args) or pi.tools.call(name, args).",
-			"Keep Pi Scripts small, await blocking tools, and use background:true for long-running bash commands that should wake the session later.",
+			"Keep Pi Scripts small, await blocking tools, use pi.exec([...]) for safely quoted commands, pi.file(path).write(...) for generated files, and background:true/pi.bg for long-running bash commands.",
 		],
 		parameters: Type.Object({
-			code: Type.String({ description: "TypeScript script body. Use the global pi object; top-level await works as normal await in the body. Do not use import/export." }),
+			code: Type.String({ description: "TypeScript script body. Use the global pi object; top-level await works as normal await in the body. Static module syntax is not supported; use pi.importModule for helpers." }),
 			timeoutMs: Type.Optional(Type.Number({ description: "Maximum script runtime in milliseconds. Default 60000." })),
 		}),
 		renderCall(args, theme) {

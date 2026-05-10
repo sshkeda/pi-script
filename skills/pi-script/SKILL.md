@@ -13,14 +13,9 @@ script_run, or when debugging Pi Script tool orchestration.
 
 ## Mental model
 
-Pi Script is one Pi tool with one parameter:
-
-```json
-{ "code": "TypeScript body" }
-```
-
-Inside that single code string, use the global pi SDK to call normal Pi tools.
-Treat script_run as Pi's tool protocol expressed in TypeScript, not arbitrary Node execution.
+Pi Script is one Pi tool with one primary payload: TypeScript code for script_run.
+Inside code, use the global pi SDK to call normal Pi tools. Treat script_run as
+Pi's tool protocol expressed in TypeScript, not arbitrary Node execution.
 
 ## Core rules
 
@@ -34,64 +29,60 @@ Treat script_run as Pi's tool protocol expressed in TypeScript, not arbitrary No
 - Use pi.print(...) only for progress or important model-visible facts.
 - Use pi.log(...) for debug notes that should stay out of model context.
 
-## Avoid quote soup
+## Production helpers
 
-Nested shell/Python/JS inside the JSON code parameter can get ugly. Prefer these patterns:
+Use the built-in helpers instead of manually nesting shell/Python/JS quote soup.
 
-### Write files, then run them
-
-Good for generated scripts or larger snippets:
+### Generated files and command vectors
 
 ```ts
-const py = String.raw`
-import json
-print(json.dumps({"ok": True}))
+const py = pi.dedent`
+  import json
+  print(json.dumps({"ok": True}))
 `;
-await pi.write({ path: ".pi/tmp/check.py", content: py });
-const run = await pi.bash({ command: "python3 .pi/tmp/check.py", timeout: 30 });
-return { output: run.content[0]?.text };
+await pi.file(".pi/tmp/check.py").write(py);
+const run = await pi.exec(["python3", ".pi/tmp/check.py"], { timeout: 30 });
+return { output: run.content[0]?.text?.trim() };
 ```
 
-### Use files instead of nested quote soup
-
-For complex shell, write a small .sh file first:
+### Shell templates with safe interpolation
 
 ```ts
-const sh = String.raw`
-set -euo pipefail
-cd ../pi-stat422
-python3 scripts/run_needle_mode_compare.py \
-  --provider pi-codex \
-  --model gpt-5.4-mini
+const branch = "feature/quote test";
+const status = await pi.bash({ command: pi.sh`
+  git status --short --branch ${branch}
+` });
+return { status: status.content[0]?.text };
+```
+
+### Background jobs
+
+```ts
+const job = await pi.bg`
+  npm test
 `;
-await pi.write({ path: ".pi/tmp/run-bench.sh", content: sh });
-await pi.bash({ command: "bash .pi/tmp/run-bench.sh", timeout: 300, background: true });
-return { started: true };
+return { job: job.details };
 ```
 
-### Avoid static module syntax in script bodies
+Useful helpers:
 
-Current Pi Script MVP rejects static module syntax. If you need runtime helpers, use:
-
-```ts
-const helper = await pi.importModule("./helper.js");
-return helper.summarize(await pi.ls({ path: "." }));
-```
+- pi.dedent — strip common indentation from strings/tagged templates.
+- pi.sh — shell tagged template; interpolated values are POSIX shell quoted.
+- pi.shellQuote(value) — quote one value for shell usage.
+- pi.exec(argv, opts) — run a command vector through the bash tool.
+- pi.writeText(path, content) and pi.file(path).write(...) — write via the write tool.
+- pi.bg — start a background bash command.
+- pi.table(rows, columns?) — return compact table-shaped data.
+- pi.parallel(tasks, { concurrency }) — run independent async tasks with a limit.
 
 ## Tool calls and native path
 
-- Prefer convenience wrappers like pi.read(args), pi.edit(args), and pi.bash(args).
+- Prefer convenience wrappers like pi.read(args), pi.edit(args), pi.bash(args), and pi.exec(args).
 - Child calls should emit native nested tool events when the Pi core patch is active.
 - If a result's call summary shows [builtin-fallback], the script used a compatibility
-  fallback instead of a native registered tool definition. That is acceptable for tests
-  but not ideal for production behavior. Re-run after /reload or report it as a Pi
-  core/extension lookup issue if it persists.
-- Background bash should go through the active bash tool:
-
-```ts
-const run = await pi.bash({ command: "npm test", background: true, timeout: 120 });
-return { jobId: run.details?.jobId };
-```
+  fallback instead of a native registered tool definition. Re-run after /reload or report
+  it as a core/extension lookup issue if it persists.
+- Background bash should go through the active bash tool using background:true or pi.bg.
 
 When the background result arrives as pi-background-bash context, treat it as the final bash result.
 
@@ -116,8 +107,8 @@ for (const path of paths) {
 return { results };
 ```
 
-4. For destructive operations (write, edit, bash with mutations), prefer validating
-   inputs first, then perform the mutation in a small script.
+4. For destructive operations, validate inputs first, then perform the mutation in a small script.
+5. If script_run times out, nested tool calls should be aborted when the underlying tool honors AbortSignal.
 
 ## Context efficiency
 
@@ -128,19 +119,8 @@ return { results };
 - If you need large output later, return a path to a file or ask the underlying tool to
   save/read the full output rather than stuffing it into the Pi Script return value.
 
-## Desired language direction
+## Language direction
 
-The design goal is still one tool, one parameter. Prefer improving the language/SDK
-inside code rather than adding more tool parameters. If Pi Script grows, favor a
-small TypeScript dialect/profile with Pi-native helpers over a brand-new language:
-
-```ts
-await $bash`npm test`;
-await $file("tmp.py").write`
-  print("hello")
-`;
-return $table(rows);
-```
-
-Do not invent new loop/condition/function syntax. Keep TypeScript for control flow;
-add only Pi-specific helpers for shell, files, background jobs, module loading, and rendering.
+Keep TypeScript for control flow. Prefer Pi-native SDK helpers over a brand-new language
+or extra tool parameters. Do not invent new loop/condition/function syntax; add only helpers
+for shell, files, background jobs, module loading, and rendering.

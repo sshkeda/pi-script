@@ -63,6 +63,23 @@ test("pi-script mode, SDK tool calls, and background-bash delegation", async () 
     assert.equal(details.returnValue.body.includes("hello from pi-script"), true);
     assert.deepEqual(details.prints, ["read complete"]);
     assert.equal(details.calls[0].name, "read");
+
+    const helpers = await mock.invokeTool("script_run", {
+      code: [
+        'const py = pi.dedent("  import json\\n  print(json.dumps({\\"ok\\": True}))");',
+        'await pi.file("quoted name.py").write(py);',
+        'const run = await pi.exec(["python3", "quoted name.py"]);',
+        'return { py, output: run.content[0].text.trim(), quoted: pi.shellQuote("a b\'c") };',
+      ].join("\n"),
+    });
+    assert.equal(helpers.ok, true, helpers.error);
+    assert.equal(helpers.result?.details?.returnValue?.py.startsWith("import json"), true);
+    assert.equal(helpers.result?.details?.returnValue?.output, '{"ok": true}');
+    assert.equal(helpers.result?.details?.returnValue?.quoted, String.raw`'a b'"'"'c'`);
+
+    const badModuleSyntax = await mock.invokeTool("script_run", { code: 'import x from "./x.js";' });
+    assert.equal(badModuleSyntax.ok, false);
+    assert.match(badModuleSyntax.error, /static module syntax/);
   });
 
   const helper = new URL("../tmp-pi-script-helper.mjs", import.meta.url);
