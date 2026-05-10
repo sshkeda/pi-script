@@ -90,11 +90,17 @@ function getToolInfos(pi: ExtensionAPI): ToolInfoLike[] {
 
 function getToolDefinition(pi: ExtensionAPI, ctx: ExtensionContext, name: string): ToolDefinitionLike | undefined {
 	if (name === TOOL_NAME) return undefined;
-	const direct = apiAny(pi).getToolDefinition?.(name) as ToolDefinitionLike | undefined;
-	if (direct) return direct;
+	const direct = apiAny(pi).getToolDefinition?.(name) as (ToolDefinitionLike & { __piScriptResolveSource?: string }) | undefined;
+	if (direct) {
+		direct.__piScriptResolveSource = "native";
+		return direct;
+	}
 	const registered = (apiAny(pi).getAllRegisteredTools?.() ?? []) as Array<{ definition: ToolDefinitionLike }>;
-	const registeredMatch = registered.find((entry) => entry.definition?.name === name)?.definition;
-	if (registeredMatch) return registeredMatch;
+	const registeredMatch = registered.find((entry) => entry.definition?.name === name)?.definition as (ToolDefinitionLike & { __piScriptResolveSource?: string }) | undefined;
+	if (registeredMatch) {
+		registeredMatch.__piScriptResolveSource = "registered";
+		return registeredMatch;
+	}
 	// Fallback for pi-mock/older Pi APIs that expose tool metadata but not definitions.
 	// Production Pi Script should use ExtensionAPI.getToolDefinition so extension overrides
 	// like pi-background-bash are delegated rather than reimplemented.
@@ -107,7 +113,9 @@ function getToolDefinition(pi: ExtensionAPI, ctx: ExtensionContext, name: string
 		find: () => createFindToolDefinition(ctx.cwd) as unknown as ToolDefinitionLike,
 		ls: () => createLsToolDefinition(ctx.cwd) as unknown as ToolDefinitionLike,
 	};
-	return builtins[name]?.();
+	const fallback = builtins[name]?.() as (ToolDefinitionLike & { __piScriptResolveSource?: string }) | undefined;
+	if (fallback) fallback.__piScriptResolveSource = "builtin-fallback";
+	return fallback;
 }
 
 function getMessageText(message: any): string {
@@ -308,7 +316,7 @@ function makeScriptPi(pi: ExtensionAPI, ctx: ExtensionContext, parentToolCallId:
 		}
 		const childId = `${parentToolCallId}.${childSeq++}.${name.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 		const preparedArgs = definition.prepareArguments ? definition.prepareArguments(args) : args;
-		calls.push({ id: childId, name, args: makeJsonSafe(preparedArgs), ok: false });
+		calls.push({ id: childId, name, source: (definition as any).__piScriptResolveSource, args: makeJsonSafe(preparedArgs), ok: false } as any);
 		onUpdate?.({ content: [{ type: "text", text: `↳ ${name} ${formatValue(preparedArgs).slice(0, 300)}` }], details: { childId, name, args: preparedArgs } });
 		try {
 			const result = await definition.execute(childId, preparedArgs, ctx.signal, (update) => {
