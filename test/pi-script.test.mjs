@@ -119,8 +119,8 @@ test("pi-script mode, SDK tool calls, and background-bash delegation", async () 
     const serialized = JSON.stringify(events);
     assert.match(serialized, /\"name\":\"bash\"/);
     assert.doesNotMatch(serialized, /builtin-fallback/);
-    assert.match(serialized, /Bash job bg_\d+ started in background|outcome.?:.?running/);
-    const match = serialized.match(/bg_\d+/);
+    assert.match(serialized, /Bash job bg(?:_?\d+) started in background|outcome.?:.?running/);
+    const match = serialized.match(/bg(?:_?\d+)/);
     assert.ok(match);
     await mock.waitFor((event) => JSON.stringify(event).includes("background_bash_result") && JSON.stringify(event).includes(match[0]), 10_000);
   } finally {
