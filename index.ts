@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import ts from "typescript";
-import { piContext, section, stringifyPayload, sanitizeText } from "pi-context";
+import { piContext, section, stringifyPayload, truncateContextText } from "pi-context";
 import { createPiPending } from "pi-pending";
 import { Text } from "@earendil-works/pi-tui";
 
@@ -632,7 +632,11 @@ export default function piScriptExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (!state.enabled) return;
 		state.lastTypes = generateTypes(pi);
-		const typeText = sanitizeText(state.lastTypes, { maxChars: MAX_CONTEXT_CHARS }).text;
+		const typeText = truncateContextText(state.lastTypes, {
+			mode: "head",
+			maxBytes: MAX_CONTEXT_CHARS,
+			maxLines: Number.MAX_SAFE_INTEGER,
+		}).content;
 		return {
 			systemPrompt: `${_event.systemPrompt}\n\nPi Script mode is enabled. You have exactly one model-visible tool: ${TOOL_NAME}. Use ${TOOL_NAME} for every action. Inside ${TOOL_NAME}, write TypeScript using the global pi SDK. Do not ask for or assume direct tools; direct Pi tools are available through pi.<toolName>(args) and pi.tools.call(name, args). Top-level await is supported by writing normal await statements in the script body. Return a small JSON-serializable value and use pi.print() for model-visible progress. Use pi.dedent, pi.sh, pi.exec([...]), and pi.file(path).write(...) to avoid quote soup. Long-running bash should use background:true or pi.bg when appropriate.\n\n${typeText}`,
 		};
