@@ -229,5 +229,46 @@
         "reason": "Pi Script needs native nested child tool execution events for its TypeScript SDK calls."
       }
     ]
+  },
+  {
+    "id": "052-agent-session-invoke-tool-hooks-before-missing-tool",
+    "file": "dist/core/agent-session.js",
+    "intent": "Let extension tool_call hooks short-circuit AgentSession.invokeTool calls before Pi reports a missing tool, so provider bridges can resolve display-only provider tools that are intentionally not registered as normal Pi tools.",
+    "find": "        let result;\n        let isError = false;\n        let preparedArgs = rawArgs;\n        try {\n            if (!tool) {\n                result = this._createErrorToolResult(`Tool ${name} not found`);\n                isError = true;\n            }\n            else {\n                preparedArgs = tool.prepareArguments ? tool.prepareArguments(rawArgs) : rawArgs;\n                const beforeResult = await this._extensionRunner.emitToolCall({\n                    type: \"tool_call\",\n                    toolName: name,\n                    toolCallId,\n                    input: preparedArgs,\n                });\n                if (beforeResult?.block) {\n                    result = beforeResult.content || beforeResult.details !== undefined\n                        ? {\n                            content: beforeResult.content ?? [{ type: \"text\", text: beforeResult.reason || \"Tool execution was blocked\" }],\n                            details: beforeResult.details,\n                        }\n                        : this._createErrorToolResult(beforeResult.reason || \"Tool execution was blocked\");\n                    isError = beforeResult.isError ?? !(beforeResult.content || beforeResult.details !== undefined);\n                }\n                else {\n                    try {",
+    "replace": "        let result;\n        let isError = false;\n        let preparedArgs = rawArgs;\n        try {\n            preparedArgs = tool?.prepareArguments ? tool.prepareArguments(rawArgs) : rawArgs;\n            const beforeResult = await this._extensionRunner.emitToolCall({\n                type: \"tool_call\",\n                toolName: name,\n                toolCallId,\n                input: preparedArgs,\n            });\n            if (beforeResult?.block) {\n                result = beforeResult.content || beforeResult.details !== undefined\n                    ? {\n                        content: beforeResult.content ?? [{ type: \"text\", text: beforeResult.reason || \"Tool execution was blocked\" }],\n                        details: beforeResult.details,\n                    }\n                    : this._createErrorToolResult(beforeResult.reason || \"Tool execution was blocked\");\n                isError = beforeResult.isError ?? !(beforeResult.content || beforeResult.details !== undefined);\n            }\n            else if (!tool) {\n                result = this._createErrorToolResult(`Tool ${name} not found`);\n                isError = true;\n            }\n            else {\n                try {",
+    "verify": "preparedArgs = tool?.prepareArguments ? tool.prepareArguments(rawArgs) : rawArgs;",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "This patch extends pi-script's native AgentSession.invokeTool hook pipeline."
+      },
+      {
+        "type": "consumer-repo",
+        "repo": "pi-claude-code",
+        "paths": [
+          "index.ts",
+          "test/claude-code-mock-real-pi.mjs"
+        ],
+        "reason": "pi-claude-code emits provider-owned display-only tool rows such as ToolSearch; AgentSession.invokeTool must give the extension hook a chance to resolve them before returning a missing-tool result."
+      }
+    ]
+  },
+  {
+    "id": "053-agent-session-invoke-tool-hook-brace-fix",
+    "file": "dist/core/agent-session.js",
+    "intent": "Remove the stale closing brace left after moving AgentSession.invokeTool tool_call hooks before missing-tool handling.",
+    "find": "                }\n            }\n        }\n        catch (error) {",
+    "replace": "                }\n        }\n        catch (error) {",
+    "verify": "                }\n        }\n        catch (error) {",
+    "occurrences": 1,
+    "references": [
+      {
+        "type": "consumer-repo",
+        "repo": "pi-script",
+        "reason": "Follows the invokeTool hook-order patch and keeps generated AgentSession JavaScript syntactically valid."
+      }
+    ]
   }
 ]
