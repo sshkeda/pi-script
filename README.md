@@ -1,8 +1,22 @@
 # pi-script
 
-**Pi Script** is a Pi extension that toggles a TypeScript-native single-tool mode.
+A [pi](https://github.com/earendil-works/pi-mono) extension that toggles a TypeScript-native single-tool mode. The model primarily calls one tool — `script_run` — and writes TypeScript against a generated `pi` SDK that delegates back through pi's normal tools.
 
-```txt
+## Install
+
+```bash
+# From git
+pi install git:github.com/sshkeda/pi-script
+
+# From local path
+pi install /path/to/pi-script
+```
+
+## Usage
+
+Toggle the mode from inside a pi session:
+
+```text
 /script on      # expose only script_run to the model
 /script off     # restore the previous active tool set
 /script status  # show mode and active tools
@@ -10,10 +24,17 @@
 /script tools   # list tools callable from scripts
 ```
 
-Pi Script keeps the tool interface intentionally narrow: the model primarily calls one tool,
-`script_run`, and writes TypeScript against a global `pi` SDK. The SDK is generated from
-the currently registered Pi tools and delegates through native tool definitions when the core
-`invokeTool` patch is available, so child calls render as native nested tool executions.
+Or activate it at launch via environment variable (useful for benchmark subprocesses):
+
+```bash
+PI_SCRIPT=1 pi --print --tools script_run "Do the task"
+```
+
+`PI_SCRIPT_MODE=1` is an alias.
+
+## SDK example
+
+The SDK is generated from currently registered Pi tools and delegates through native tool definitions when the core `invokeTool` patch is available, so child calls render as native nested tool executions.
 
 ```ts
 const msg = pi.session.latestUserMessage();
@@ -23,9 +44,7 @@ pi.print("started", test.details?.jobId);
 return { user: msg.text, testJob: test.details?.jobId };
 ```
 
-## Production-oriented SDK helpers
-
-Pi Script includes helpers to reduce quote soup while preserving the one-tool workflow:
+Production helpers reduce quote soup while preserving the one-tool workflow:
 
 ```ts
 const py = pi.dedent`
@@ -37,7 +56,7 @@ const run = await pi.exec(["python3", "tmp/check.py"]);
 return { output: run.content[0].text.trim() };
 ```
 
-Useful helpers:
+Available helpers:
 
 - `pi.dedent` — strip common indentation from strings/tagged templates.
 - `pi.sh` — shell tagged template; interpolated values are POSIX shell quoted.
@@ -50,27 +69,17 @@ Useful helpers:
 - `pi.parallel(tasks, { concurrency })` — run independent async tasks with a limit.
 - `pi.importModule(specifier)` — load helper modules relative to the session cwd.
 
-## Runtime behavior
+## How it works
 
-- Model-visible output stays compact: final results use a `pi_context` envelope with call
-  summaries, built-in truncation, and a full-output temp file when truncated.
-- The TUI renderer shows a compact native-style `Pi Script: N calls` result, with expanded
-  call details on demand.
-- Script timeouts now abort nested tool calls when possible and always clear timers.
-- Static module syntax is rejected with a targeted error; use `await pi.importModule(...)` for
-  helpers. String contents containing words like Python imports are allowed.
-
-## Environment activation
-
-Set `PI_SCRIPT=1` or `PI_SCRIPT_MODE=1` before launching Pi to start a session with Pi Script
-mode enabled. This is useful for benchmark subprocesses:
-
-```bash
-PI_SCRIPT=1 pi --print --tools script_run "Do the task"
-```
+- Model-visible output stays compact: final results use a `pi_context` envelope with call summaries, built-in truncation, and a full-output temp file when truncated.
+- The TUI renderer shows a compact native-style `Pi Script: N calls` result, with expanded call details on demand.
+- Script timeouts abort nested tool calls when possible and always clear timers.
+- Static module syntax is rejected with a targeted error; use `await pi.importModule(...)` for helpers. String contents that look like imports are allowed.
 
 ## Safety note
 
-Pi Script uses a Node VM/transpile runtime for local automation. It is not a hardened security
-sandbox. Treat scripts as trusted agent code and rely on Pi tool permissions/hooks for file and
-process effects.
+Pi Script uses a Node VM/transpile runtime for local automation. It is not a hardened security sandbox. Treat scripts as trusted agent code and rely on pi's tool permissions/hooks for file and process effects.
+
+## License
+
+MIT
